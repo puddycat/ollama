@@ -1,0 +1,245 @@
+#! /usr/bin/env bash
+#
+# ollama/bin/start
+#
+# raymondstrose@hotmail.com
+#
+#   Start a local Docker Ollama instance.
+#
+
+append () { sed -e "s?\$?$@?"; }
+prepend () { sed -e "s?^?$@?"; }
+indent () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "    "; }
+error () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: error: " >&2; }
+warning () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: warning: " >&2; }
+notice () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: notice: " >&2; }
+info () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: info: " >&2; }
+verbose () { $VERBOSE_MODE && { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: verbose: " >&2; } }
+debug () { $DEBUG_MODE && { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: debug: " >&2; } }
+
+function execute ()
+{
+	declare -a params;
+
+	for param; do
+		if [[ -z "${param}" || "${param}" =~ [^A-Za-z0-9_@%+=:,./-] ]]; then
+			params+=("'${param//\'/\'\"\'\"\'}'");
+		else
+			params+=("${param}");
+		fi;
+	done;
+
+	debug "${params[*]}";
+	eval ${params[*]};
+}
+
+environment_variables ()
+{
+	cat <<-EOF
+		--env REGISTRY_HTTP_HEADERS_Access-Control-Allow-Origin=[http://localhost:5001/]
+		--env REGISTRY_HTTP_HEADERS_Access-Control-Allow-Methods=[HEAD,GET,OPTIONS,DELETE]
+		--env REGISTRY_HTTP_HEADERS_Access-Control-Allow-Credentials=[true]
+		--env REGISTRY_HTTP_HEADERS_Access-Control-Allow-Headers=[Authorization,Accept,Cache-Control]
+		--env REGISTRY_HTTP_HEADERS_Access-Control-Expose-Headers=[Docker-Content-Digest]
+		--env REGISTRY_STORAGE_DELETE_ENABLED=true
+		EOF
+}
+
+main ()
+{
+# Display usage information.
+#
+	usage ()
+	{
+		cat <<-EOF >&2
+			$PROGNAME: usage: $PROGNAME [--help] [--debug] [--verbose] [--noop] [--config-dir {path}] [--image-name {name}] [--image-tag {tag}] [--container-name {name}]
+
+			--container-name {name}     Specify the Docker container name (default: $CONTAINER_NAME)
+			--image-name {name}         Specify the Docker image tag (default: $DOCKER_IMAGE_NAME)
+			--image-tag {tag}           Specify the Docker image tag (default: $DOCKER_IMAGE_TAG)
+			--config-dir {path}         Specify the configuration directory (default: $CONFIG_DIR)
+			--noop                      Don't perform the operation, just report the actions that would be carried out.
+			--verbose                   Enable verbose mode.
+			--debug                     Enable debug mode.
+			--help                      Display this usage information.
+			EOF
+
+		return 0;
+	}
+
+# Load configuration files.
+#
+	load_config ()
+	{
+		if [ "$CONFIG_DIR" ]; then
+			if [ -d "$CONFIG_DIR" ]; then
+
+			# Configure the process
+			#
+				notice "Loading configuration.";
+				for filename in $CONFIG_DIR/*; do
+					indent "$filename" | debug;
+					[ -f "$filename" ] && { source "$filename" || return 1; }
+				done;
+			fi;
+		fi;
+
+		return 0;
+	}
+
+# Create a network over which the Registry can be accessed by the UI.
+#
+	create_docker_network ()
+	{
+		if [ "$DOCKER_NETWORK" -a "$DOCKER_NETWORK" != "bridge" ]; then
+			execute docker network create $DOCKER_NETWORK;
+		fi;
+
+		return 0;
+	}
+
+	docker_network_opts ()
+	{
+		if [ "$DOCKER_NETWORK" ]; then
+			echo "--net=$DOCKER_NETWORK";
+		fi;
+
+		return 0;
+	}
+
+	docker_mount_opts ()
+	{
+		$MOUNT_HOST_DOCKER && echo "-v $(which docker):/usr/bin/docker";
+		$MOUNT_HOST_DOCKER_SOCKET && echo "-v /var/run/docker.sock:/var/run/docker.sock";
+
+		if [ "$DOCKER_REGISTRY_VOLUME_NAME" -a "$DOCKER_REGISTRY_MOUNT_POINT" ]; then
+			echo "--mount source=$DOCKER_REGISTRY_VOLUME_NAME,destination=$DOCKER_REGISTRY_MOUNT_POINT";
+		fi;
+
+		return 0;
+	}
+
+	restart_opts ()
+	{
+		echo "--restart=always";
+		return 0;
+	}
+
+	docker_address_opts ()
+	{
+		if [ "$REGISTRY_HTTP_ADDR" ]; then
+			echo "-e REGISTRY_HTTP_ADDR=$REGISTRY_HTTP_ADDR";
+		fi;
+
+		return 0;
+	}
+
+# Override Docker Registry configuration.
+#
+	docker_config_opts ()
+	{
+		if [ -f "$DOCKER_CONFIG_FILE" ]; then
+			echo "-v $DOCKER_CONFIG_FILE:/etc/docker/registry/config.yml";
+		fi;
+
+		return 0;
+	}
+
+	export PROGNAME=$(basename "$0");
+	export PROGDIR=$(dirname "$0");
+	export INSTALL_DIR=$(dirname "$PROGDIR"); [ "$INSTALL_DIR" = "." ] && INSTALL_DIR=$(pwd);
+	export CONFIG_DIR="$INSTALL_DIR/etc/$PROGNAME";
+	export LIB_DIR="$INSTALL_DIR/lib/$PROGNAME";
+	export WORK_DIR="$INSTALL_DIR/var/$PROGNAME";
+	export DEBUG_MODE=false;
+	export VERBOSE_MODE=false;
+	export NOOP_MODE=false;
+	export MOUNT_HOST_DOCKER=false;
+	export MOUNT_HOST_DOCKER_SOCKET=false;
+	export DOCKER_IMAGE_NAME="raymondstrose/ollama";
+	export DOCKER_IMAGE_TAG="0.5.12";
+	export DOCKER_REGISTRY_VOLUME_NAME="ollama";
+	export DOCKER_REGISTRY_MOUNT_POINT="/root/.ollama";
+	export CONTAINER_NAME="ollama";
+	export DOCKER_CONFIG_FILE="$INSTALL_DIR/conf/config.yaml";
+	export REGISTRY_HTTP_ADDR="";
+	export DOCKER_NETWORK="bridge";
+
+# Load the default configuration files.
+	load_config || return $?;
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--container-name|--container-name=?*)
+			case "$1" in
+			--container-name)		CONTAINER_NAME="$2"; shift;;
+			--container-name=?*)	CONTAINER_NAME="${1#--container-name=}";;
+			esac;;
+		--image-tag|--image-tag=?*)
+			case "$1" in
+			--image-tag)	DOCKER_IMAGE_TAG="$2"; shift;;
+			--image-tag=?*)	DOCKER_IMAGE_TAG="${1#--image-tag=}";;
+			esac;;
+		--image-name|--image-name=?*)
+			case "$1" in
+			--image-name)		DOCKER_IMAGE_NAME="$2"; shift;;
+			--image-name=?*)	DOCKER_IMAGE_NAME="${1#--image-name=}";;
+			esac;;
+		--config-dir|--config-dir=?*)
+			case "$1" in
+			--config-dir)		CONFIG_DIR="$2"; shift;;
+			--config-dir=?*)	CONFIG_DIR="${1#--config-dir=}";;
+			esac;
+
+		# Load the specified configuration files.
+			load_config || return $?;;
+		--debug)	$DEBUG_MODE && set -x; DEBUG_MODE=true;;
+		--noop)		NOOP_MODE=true;;
+		--verbose)	VERBOSE_MODE=true;;
+		--help) usage; return 2;;
+		--) shift; break;;
+		-*)	error "unknown option \"$1\""; usage; return 1;;
+		*)	error "unrecognised command line argument \"$1\""; usage; return 1;;
+		esac;
+
+		shift;
+	done;
+
+	DOCKER_IMAGE="$DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG";
+
+	create_docker_network;
+
+# Create a Docker Registry container with a volume. This allows the upgrade of Docker Registry while preserving the configuration information.
+#	execute docker run	\
+#		--name $CONTAINER_NAME	\
+#		-p 11434:11434	\
+#		--detach	\
+#		$(environment_variables)	\
+#		$(docker_network_opts)	\
+#		$(restart_opts)	\
+#		$(docker_address_opts)	\
+#		$(docker_mount_opts)	\
+#		$(docker_config_opts)	\
+#		"$DOCKER_IMAGE";
+
+	docker run	\
+		--name $CONTAINER_NAME	\
+		-p 11434:11434	\
+		--detach	\
+		$(environment_variables)	\
+		$(docker_network_opts)	\
+		$(restart_opts)	\
+		$(docker_address_opts)	\
+		$(docker_mount_opts)	\
+		$(docker_config_opts)	\
+		"$DOCKER_IMAGE";
+
+	if [ $? -ne 0 ]; then
+		error "failed to start container";
+		return 1;
+	fi;
+
+	return 0;
+}
+
+	main "$@";

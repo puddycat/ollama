@@ -1,0 +1,11 @@
+#! /usr/bin/env bash
+#
+# ollama/bin/stop
+#
+# raymondstrose@hotmail.com
+#
+#   Stop a local Docker Ollama instance.
+#
+
+docker stop ollama;
+docker rm ollama;
